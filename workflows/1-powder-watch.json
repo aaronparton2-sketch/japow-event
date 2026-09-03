@@ -1,0 +1,460 @@
+{
+  "name": "JAPOW EVENT - 1. Powder watch",
+  "description": null,
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "name": "Every 6h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -180,
+        380
+      ]
+    },
+    {
+      "parameters": {},
+      "name": "Run (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -180,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// =====================================================================================\n//  CONFIG - everything you need to change lives here.\n//  Secrets do NOT live here; they are n8n credentials (Telegram, Supabase, Apify,\n//  RapidAPI, Bland). This node holds the non-secret settings only.\n// =====================================================================================\nreturn [{ json: { config: {\n\n  // --- the mountain -----------------------------------------------------------------\n  resortUrl:      'https://www.snow-forecast.com/resorts/Niseko/6day/top',\n  resortName:     'Niseko Grand Hirafu',\n  liftLat:        42.8615,       // Hirafu gondola, used for the boot-walk ranking\n  liftLng:        140.6982,\n\n  // --- the trigger ------------------------------------------------------------------\n  snowCm:         40,            // overnight dump that counts\n  coldC:          -10,           // must stay at or below this...\n  coldRunDays:    3,             // ...for this many days straight\n  tripNights:     5,\n\n  // --- travel -----------------------------------------------------------------------\n  homeAirport:    'PER',\n  arriveAirport:  'CTS',         // Sapporo New Chitose\n  adults:         4,\n\n  // --- the arrival sequence ---------------------------------------------------------\n  transferLeadMins: 30,          // book the taxi this long before touchdown\n  beerLeadMins:     10,          // order the beers this many minutes from the chalet\n\n  // Saved contacts. Swap these for the operators you actually use.\n  taxiContact:  { name: 'Niseko Taxi',        phone: 'YOUR_PHONE_NUMBER' },\n  beerContact:  { name: 'Hirafu Bottle Shop', phone: 'YOUR_PHONE_NUMBER' },\n\n  // --- who gets told ----------------------------------------------------------------\n  telegramChatId: 'YOUR_TELEGRAM_CHAT_ID',\n} }}];\n"
+      },
+      "name": "⚙️ CONFIG",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.config.resortUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-AU,en;q=0.9"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "name": "Snow-Forecast: Niseko (top)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        320,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Parse snow-forecast.com's server-rendered table. There is no API; the rows are\n// semantically tagged with data-row=..., and 18 columns = 6 days x (AM, PM, night).\nconst doc = $input.first().json.data || '';\nif (!doc || doc.length < 5000) {\n  throw new Error('snow-forecast returned ' + doc.length + ' chars - blocked or layout changed');\n}\nfunction row(name) {\n  const m = doc.match(new RegExp('<tr class=\"forecast-table__row\" data-row=\"' + name + '\"[\\\\s\\\\S]*?<\\\\/tr>'));\n  if (!m) return [];\n  return [...m[0].matchAll(/<td[^>]*>([\\s\\S]*?)<\\/td>/g)].map(function (c) {\n    return c[1].replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\\s+/g, ' ').trim();\n  });\n}\nconst num = function (v) {\n  const n = parseFloat(String(v).replace(/[^0-9.\\-]/g, ''));\n  return isNaN(n) ? 0 : n;\n};\n\nconst days = row('days');\nconst time = row('time');\nconst snow = row('snow').map(num);\nconst tmax = row('temperature-max').map(num);\nconst tmin = row('temperature-min').map(num);\nconst wind = row('wind');\nconst phrase = row('phrases');\nconst freeze = row('freezing-level').map(num);\n\nif (time.length === 0) {\n  throw new Error('table found but 0 periods parsed - snow-forecast changed its markup');\n}\n\nconst periods = time.map(function (t, i) {\n  return {\n    period: t,\n    snow_cm: snow[i] || 0,\n    tmax: tmax[i] || 0,\n    tmin: tmin[i] || 0,\n    wind: wind[i] || '',\n    sky: phrase[i] || '',\n    freezing_level_m: freeze[i] || 0,\n  };\n});\n\nconst base = new Date();\nconst iso = function (offsetDays) {\n  return new Date(base.getTime() + offsetDays * 86400000).toISOString().slice(0, 10);\n};\n\nconst daily = days.map(function (d, di) {\n  const p = periods.slice(di * 3, di * 3 + 3);\n  const night = p.filter(function (x) { return x.period === 'night'; })[0];\n  return {\n    day: d,\n    date: iso(di),\n    snow_cm_total: +p.reduce(function (s, x) { return s + x.snow_cm; }, 0).toFixed(1),\n    snow_cm_overnight: night ? night.snow_cm : 0,\n    tmax: Math.max.apply(null, p.map(function (x) { return x.tmax; })),\n    tmin: Math.min.apply(null, p.map(function (x) { return x.tmin; })),\n    sky: p.map(function (x) { return x.sky; }).join(' / '),\n    periods: p,\n  };\n});\n\nreturn [{ json: {\n  resort: 'Niseko Grand Hirafu (top station)',\n  source: 'snow-forecast.com',\n  scraped_at: new Date().toISOString(),\n  days_parsed: daily.length,\n  daily: daily,\n} }];\n"
+      },
+      "name": "Parse forecast table",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// The three conditions, straight off the script:\n//   40cm overnight + under -10C for three days straight + clear skies on the fourth.\nconst d = $input.first().json;\nconst daily = d.daily || [];\nconst SNOW_CM = 40;\nconst COLD_C = -10;\nconst COLD_RUN = 3;\n\nlet dump = null;\nfor (const day of daily) {\n  if (day.snow_cm_overnight >= SNOW_CM || day.snow_cm_total >= SNOW_CM) { dump = day; break; }\n}\n\nlet run = 0, start = -1;\nfor (let i = 0; i < daily.length; i++) {\n  if (daily[i].tmax <= COLD_C) {\n    if (run === 0) start = i;\n    run++;\n    if (run >= COLD_RUN) break;\n  } else { run = 0; start = -1; }\n}\nconst coldOK = run >= COLD_RUN;\nconst fourth = coldOK ? daily[start + COLD_RUN] : null;\nconst clearOK = !!fourth && /clear|sunny|fair|some sun/i.test(fourth.sky);\n\nconst conditions = {\n  dump: {\n    ok: !!dump, need: SNOW_CM + 'cm',\n    got: dump ? (dump.snow_cm_total + 'cm on ' + dump.day)\n              : ('nothing over ' + SNOW_CM + 'cm in the next 6 days'),\n  },\n  cold: {\n    ok: coldOK, need: COLD_RUN + ' days under ' + COLD_C + 'C',\n    got: coldOK ? ('run starts ' + daily[start].day) : ('longest run is ' + run + ' day(s)'),\n  },\n  clear: {\n    ok: clearOK, need: 'clear skies on the 4th day',\n    got: fourth ? fourth.sky : 'no 4th day to check yet',\n  },\n};\n\nconst japow = conditions.dump.ok && conditions.cold.ok && conditions.clear.ok;\nconst snowiest = daily.slice().sort(function (a, b) {\n  return b.snow_cm_total - a.snow_cm_total;\n})[0];\n\n// Trip window: fly in on the dump, stay 5 nights. The Apify legs need real dates.\nconst TRIP_NIGHTS = 5;\nconst anchor = dump || snowiest || daily[0];\nconst departDate = anchor ? anchor.date : null;\nconst returnDate = departDate\n  ? new Date(new Date(departDate).getTime() + TRIP_NIGHTS * 86400000).toISOString().slice(0, 10)\n  : null;\n\nreturn [{ json: Object.assign({}, d, {\n  japow: japow,\n  conditions: conditions,\n  headline: japow ? 'JAPOW WINDOW OPEN' : 'no window yet',\n  best_day: dump ? dump.day : (snowiest ? snowiest.day : null),\n  departDate: departDate,\n  returnDate: returnDate,\n  trip_nights: TRIP_NIGHTS,\n}) }];\n"
+      },
+      "name": "Evaluate JAPOW",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "japow",
+              "leftValue": "={{ $json.japow }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "JAPOW ON?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1040,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/johnvc~Google-Flights-Data-Scraper-Flight-and-Price-Search/run-sync-get-dataset-items?maxTotalChargeUsd=0.5&timeout=180",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n \"departure_id\":\"{{ $('⚙️ CONFIG').first().json.config.homeAirport }}\",\"arrival_id\":\"{{ $('⚙️ CONFIG').first().json.config.arriveAirport }}\",\n \"outbound_date\":\"{{ $json.departDate }}\",\n \"return_date\":\"{{ $json.returnDate }}\",\n \"adults\":1,\"currency\":\"AUD\",\"fetch_booking_options\":false,\"max_pages\":1,\"gl\":\"au\",\"hl\":\"en\"\n}",
+        "options": {
+          "timeout": 200000
+        }
+      },
+      "name": "Apify: flights PER to CTS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/tri_angle~airbnb-scraper/run-sync-get-dataset-items?maxTotalChargeUsd=0.75&timeout=180",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n \"locationQueries\":[\"Niseko Hokkaido Japan\"],\n \"checkIn\":\"{{ $('Evaluate JAPOW').item.json.departDate }}\",\n \"checkOut\":\"{{ $('Evaluate JAPOW').item.json.returnDate }}\",\n \"currency\":\"AUD\",\"adults\":4,\"maxResults\":12\n}",
+        "options": {
+          "timeout": 200000
+        }
+      },
+      "name": "Apify: Niseko chalets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1520,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Rank every chalet on how far you have to walk in snowboard boots, and let an onsen\n// win outright. The 400m hard cut from the original script was removed 2026-08-31 --\n// see the note further down.\nconst LIFT = { lat: 42.8615, lng: 140.6982 };   // Hirafu gondola base\n\nfunction flat(items) {\n  let a = items.map(function (i) { return i.json; });\n  if (a.length === 1 && Array.isArray(a[0])) a = a[0];\n  if (a.length === 1 && a[0] && Array.isArray(a[0].data)) a = a[0].data;\n  return a;\n}\nfunction metres(lat, lng) {\n  if (typeof lat !== 'number' || typeof lng !== 'number') return null;\n  const R = 6371000;\n  const toRad = function (x) { return x * Math.PI / 180; };\n  const dLat = toRad(lat - LIFT.lat);\n  const dLng = toRad(lng - LIFT.lng);\n  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +\n            Math.cos(toRad(LIFT.lat)) * Math.cos(toRad(lat)) *\n            Math.sin(dLng / 2) * Math.sin(dLng / 2);\n  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));\n}\nfunction nightly(it) {\n  // Airbnb writes this as either \"A$420 x 5 nights\" or \"5 nights x A$420\", so anchor on\n  // the CURRENCY symbol, not on the \"x\". The inherited SWELL EVENT regex took the number\n  // after the \"x\" and therefore returned the NIGHT COUNT (5) as the nightly price.\n  const desc = (((it.price || {}).breakDown || {}).basePrice || {}).description || '';\n  const money = [...desc.matchAll(/[$£€¥]\\s*([\\d,]+(?:\\.\\d+)?)/g)]\n    .map(function (m) { return parseFloat(m[1].replace(/,/g, '')); })\n    .filter(function (n) { return !isNaN(n); });\n  if (money.length) return Math.round(Math.max.apply(null, money));\n  // Fallback: price.price is the TRIP TOTAL (qualifier \"total\"), not a nightly rate.\n  // Divide it down rather than reporting a 5-night total as a per-night price.\n  const price = (it.price || {});\n  const alt = price.price || (it.pricing || {}).rate || null;\n  const n = parseFloat(String(alt).replace(/[^0-9.]/g, ''));\n  if (isNaN(n)) return null;\n  const nightsMatch = String(desc).match(/(\\d+)\\s*nights?/i);\n  const nights = nightsMatch ? parseInt(nightsMatch[1], 10) : 1;\n  return Math.round(price.qualifier === 'total' && nights > 1 ? n / nights : n);\n}\n\n// --- flights ---\nlet f = $('Apify: flights PER to CTS').first().json;\nif (Array.isArray(f)) f = f[0];\nconst flights = (f && (f.all_flights || f.best_flights)) || [];\nconst cheapest = flights.filter(function (x) { return x.price; })\n                        .sort(function (a, b) { return a.price - b.price; })[0] || {};\nconst flightLine = cheapest.price\n  ? ('A$' + cheapest.price + ' return (' + (cheapest.airlines || '?') +\n     ((cheapest.stops === 0 || cheapest.stops === '0') ? ', direct' : '') + ')')\n  : 'no fare returned';\n\n// --- chalets ---\nconst raw = flat($('Apify: Niseko chalets').all());\nconst scored = raw.map(function (v) {\n  // VERIFIED against a live tri_angle~airbnb-scraper run (2026-08-31):\n  // coords live in `coordinates.latitude/.longitude`. `location` is a STRING\n  // (\"Kutchan\"), NOT an object -- reading location.lat gave undefined, which made\n  // walk_m null for every listing, which silently broke the boot-walk ranking.\n  const c = v.coordinates || {};\n  const loc = (v.location && typeof v.location === 'object') ? v.location : {};\n  const lat = c.latitude != null ? c.latitude : (loc.lat != null ? loc.lat : v.lat);\n  const lng = c.longitude != null ? c.longitude : (loc.lng != null ? loc.lng : v.lng);\n  const blurb = [v.title, v.name, v.description, v.metaDescription,\n                 v.locationSubtitle, (v.amenities || []).join(' ')]\n                .filter(Boolean).join(' ').toLowerCase();\n  return {\n    name: v.title || v.name || 'chalet',\n    url: (v.url || '').split('?')[0],\n    nightly: nightly(v),\n    walk_m: metres(lat, lng),\n    lat: (typeof lat === 'number') ? lat : null,   // needed later: the arrival sequence\n    lng: (typeof lng === 'number') ? lng : null,   // routes the taxi to these coords\n    onsen: /onsen|hot spring|rotenburo|hot-spring/.test(blurb),\n  };\n});\n// The 400m hard bin was REMOVED at Aaron's call (2026-08-31): against real Niseko\n// inventory it binned all 6 listings (closest was 969m), so it only ever fired a fallback.\n//\n// With no cut, DISTANCE has to be the primary sort. Ranking onsen-first instead put an\n// 8,877m chalet top of the list, which makes \"ranked on how far you walk in snowboard\n// boots\" meaningless. So: shortest boot-walk wins, and an onsen only breaks a tie.\nconst keep = scored.slice().sort(function (a, b) {\n  const da = a.walk_m == null ? 9999999 : a.walk_m;\n  const db = b.walk_m == null ? 9999999 : b.walk_m;\n  if (da !== db) return da - db;                      // shortest boot-walk wins...\n  if (a.onsen !== b.onsen) return a.onsen ? -1 : 1;   // ...onsen breaks the tie\n  return 0;\n});\n\nreturn [{ json: {\n  flightLine: flightLine,\n  flightPrice: cheapest.price || null,\n  flightNumber: cheapest.flight_numbers || cheapest.flightNumber || null,\n  chalet: keep[0] || {},\n  chalets_considered: scored.length,\n  walk_rule: 'ranked by boot-walk; onsen first. No distance cut.',\n} }];\n"
+      },
+      "name": "Rank by boot-walk",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Build the row we hand to Supabase. This is what makes the system stateful: the trip\n// outlives this execution, so a workflow running days later can pick it up.\nconst s  = $('Evaluate JAPOW').first().json;\nconst p  = $('Rank by boot-walk').first().json;\nconst ch = p.chalet || {};\nconst c  = s.conditions || {};\n\nreturn [{ json: {\n  status:         'proposed',\n  depart_date:    s.departDate,\n  return_date:    s.returnDate,\n  flight_number:  p.flightNumber || null,\n  flight_date:    s.departDate,\n  flight_line:    p.flightLine,\n  flight_price:   p.flightPrice,\n  chalet_name:    ch.name || null,\n  chalet_url:     ch.url || null,\n  chalet_lat:     ch.lat != null ? ch.lat : null,\n  chalet_lng:     ch.lng != null ? ch.lng : null,\n  chalet_nightly: ch.nightly != null ? ch.nightly : null,\n  snow_summary:   [c.dump && c.dump.got, c.cold && c.cold.got, c.clear && c.clear.got]\n                    .filter(Boolean).join(' | '),\n} }];\n"
+      },
+      "name": "Build the trip row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "japow_trips",
+        "dataToSend": "autoMapInputData"
+      },
+      "name": "Save the trip",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2240,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst s = $('Evaluate JAPOW').first().json;\nconst p = $('Rank by boot-walk').first().json;\nconst c = s.conditions;\nconst ch = p.chalet || {};\nconst walk = ch.walk_m != null ? (ch.walk_m + 'm walk') : 'walk unknown';\nconst onsen = ch.onsen ? ' + ONSEN' : '';\n\n// Short, dry, and readable on a phone. Every line earns its place.\nconst MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];\nconst short = function (iso) {\n  if (!iso) return '?';\n  const d = new Date(iso);\n  return d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()];\n};\nconst dates = short(s.departDate) + ' - ' + short(s.returnDate);\n\n// Pull the bare numbers back out of the condition strings so the message stays tight.\nconst snowCm = (String(c.dump.got).match(/([\\d.]+)cm/) || [])[1];\nconst coldDay = (function () {\n  const days = (s.daily || []).filter(function (x) { return x.tmax <= -10; });\n  return days.length ? Math.min.apply(null, days.map(function (x) { return x.tmax; })) : null;\n})();\n\nconst lines = [\n  '\\u{1F3D4}️ <b>JAPOW EVENT</b>',\n  'Niseko is about to get buried.',\n  '',\n  '❄️ <b>' + (snowCm ? snowCm + 'cm' : c.dump.got) + '</b> overnight',\n  '\\u{1F976} <b>' + (coldDay != null ? coldDay + '°C' : 'cold') + '</b> for three days straight',\n  '☀️ Then it clears. Of course it does.',\n  '',\n  '\\u{1F4C5} <b>' + dates + '</b> · ' + s.trip_nights + ' nights',\n  '✈️ Perth → Sapporo · <b>' + p.flightLine + '</b>',\n  '\\u{1F3E0} ' + (ch.name || '?') + onsen,\n  '   <b>A$' + (ch.nightly != null ? ch.nightly : '?') + '/night</b> · ' + walk,\n  '   ' + (ch.url || ''),\n  '',\n  '\\u{1F97E} Closest of ' + p.chalets_considered + ' to the lifts' +\n    (ch.onsen ? ', and it has an onsen.' : '.'),\n  '',\n  '⏳ <b>Four hours.</b> Then it books without you.',\n];\nreturn [{ json: { text: lines.join('\\n') } }];\n"
+      },
+      "name": "Build the proposal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2480,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false
+        }
+      },
+      "name": "Drop it in the boys chat",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2720,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/sendPoll",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"chat_id\": YOUR_TELEGRAM_CHAT_ID, \"question\": \"🏔️ JAPOW EVENT — lock it in?\", \"options\": [\"I'm in 🤙\", \"Depends what work's like 🤓\"], \"is_anonymous\": false}",
+        "options": {}
+      },
+      "name": "Send the poll",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2960,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1. Powder watch\n\nRuns every 6 hours all season.\n\n**Everything you change is in `⚙️ CONFIG`** - resort, thresholds, airports, saved taxi and bottle-shop contacts. Secrets are n8n credentials, never node parameters.\n\nsnow-forecast.com has no API, so this parses their marked-up table.",
+        "height": 260,
+        "width": 460,
+        "color": 5
+      },
+      "name": "n1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        60,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## This is what makes it real\n\n`Save the trip` writes the trip to Supabase `japow_trips`.\n\nA trip spans WEEKS - you cannot hold an n8n execution open that long. So the trip outlives this run, and **workflow 3** picks it up days later to track the flight and run the arrival sequence.\n\nWithout this table the rest of the system cannot exist.",
+        "height": 260,
+        "width": 520,
+        "color": 3
+      },
+      "name": "n2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1960,
+        140
+      ]
+    }
+  ],
+  "connections": {
+    "⚙️ CONFIG": {
+      "main": [
+        [
+          {
+            "node": "Snow-Forecast: Niseko (top)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Snow-Forecast: Niseko (top)": {
+      "main": [
+        [
+          {
+            "node": "Parse forecast table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse forecast table": {
+      "main": [
+        [
+          {
+            "node": "Evaluate JAPOW",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate JAPOW": {
+      "main": [
+        [
+          {
+            "node": "JAPOW ON?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JAPOW ON?": {
+      "main": [
+        [
+          {
+            "node": "Apify: flights PER to CTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify: flights PER to CTS": {
+      "main": [
+        [
+          {
+            "node": "Apify: Niseko chalets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify: Niseko chalets": {
+      "main": [
+        [
+          {
+            "node": "Rank by boot-walk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rank by boot-walk": {
+      "main": [
+        [
+          {
+            "node": "Build the trip row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build the trip row": {
+      "main": [
+        [
+          {
+            "node": "Save the trip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save the trip": {
+      "main": [
+        [
+          {
+            "node": "Build the proposal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build the proposal": {
+      "main": [
+        [
+          {
+            "node": "Drop it in the boys chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Drop it in the boys chat": {
+      "main": [
+        [
+          {
+            "node": "Send the poll",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 6h": {
+      "main": [
+        [
+          {
+            "node": "⚙️ CONFIG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run (manual)": {
+      "main": [
+        [
+          {
+            "node": "⚙️ CONFIG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "activeVersionId": null,
+  "versionCounter": 3,
+  "activeVersion": null
+}

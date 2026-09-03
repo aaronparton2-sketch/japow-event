@@ -1,0 +1,187 @@
+{
+  "name": "JAPOW EVENT - 2. Lock it in",
+  "description": null,
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "path": "japow-poll",
+        "httpMethod": "POST",
+        "options": {}
+      },
+      "name": "Webhook: Telegram poll_answer",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Telegram sends a poll_answer update when someone taps an option. Option index 0 is\n// \"I'm in\". This replaces the hard-coded opt-in stub - the poll now actually decides.\nconst body = $input.first().json.body || $input.first().json || {};\nconst pa   = body.poll_answer || {};\nconst ids  = pa.option_ids || [];\nconst who  = pa.user || {};\n\nconst isIn = ids.indexOf(0) !== -1;\nreturn [{ json: {\n  optedIn:  isIn,\n  userId:   who.id || null,\n  name:     [who.first_name, who.last_name].filter(Boolean).join(' ') || 'someone',\n  pollId:   pa.poll_id || null,\n  verdict:  isIn ? 'in' : 'depends what work is like',\n} }];\n"
+      },
+      "name": "Read the vote",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        120,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.optedIn }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Anyone in?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        380,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "tableId": "japow_trips",
+        "filterType": "string",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "proposed"
+            }
+          ]
+        },
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "locked"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        }
+      },
+      "name": "Mark the trip locked",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        640,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ '✅ <b>' + $('Read the vote').first().json.name + '</b> is in. Jerry has taken over - flights locked, lift pass on its way, and the arrival sequence is armed.' }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false
+        }
+      },
+      "name": "Confirm to the chat",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Lock it in\n\n**This is what makes the poll do something.** The old version had a hard-coded 'everyone opted in' stub.\n\nTelegram sends a `poll_answer` update the moment somebody taps. Option index 0 is *I'm in*.\n\n**Point your bot's webhook here:**\n`https://api.telegram.org/bot<TOKEN>/setWebhook?url=<this webhook>&allowed_updates=[\"poll_answer\"]`",
+        "height": 240,
+        "width": 520,
+        "color": 4
+      },
+      "name": "n1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Telegram poll_answer": {
+      "main": [
+        [
+          {
+            "node": "Read the vote",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the vote": {
+      "main": [
+        [
+          {
+            "node": "Anyone in?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anyone in?": {
+      "main": [
+        [
+          {
+            "node": "Mark the trip locked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark the trip locked": {
+      "main": [
+        [
+          {
+            "node": "Confirm to the chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "activeVersionId": null,
+  "versionCounter": 3,
+  "activeVersion": null
+}

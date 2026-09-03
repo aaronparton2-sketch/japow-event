@@ -1,0 +1,635 @@
+{
+  "name": "JAPOW EVENT - 3. Arrival sequence",
+  "description": null,
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// =====================================================================================\n//  CONFIG - everything you need to change lives here.\n//  Secrets do NOT live here; they are n8n credentials (Telegram, Supabase, Apify,\n//  RapidAPI, Bland). This node holds the non-secret settings only.\n// =====================================================================================\nreturn [{ json: { config: {\n\n  // --- the mountain -----------------------------------------------------------------\n  resortUrl:      'https://www.snow-forecast.com/resorts/Niseko/6day/top',\n  resortName:     'Niseko Grand Hirafu',\n  liftLat:        42.8615,       // Hirafu gondola, used for the boot-walk ranking\n  liftLng:        140.6982,\n\n  // --- the trigger ------------------------------------------------------------------\n  snowCm:         40,            // overnight dump that counts\n  coldC:          -10,           // must stay at or below this...\n  coldRunDays:    3,             // ...for this many days straight\n  tripNights:     5,\n\n  // --- travel -----------------------------------------------------------------------\n  homeAirport:    'PER',\n  arriveAirport:  'CTS',         // Sapporo New Chitose\n  adults:         4,\n\n  // --- the arrival sequence ---------------------------------------------------------\n  transferLeadMins: 30,          // book the taxi this long before touchdown\n  beerLeadMins:     10,          // order the beers this many minutes from the chalet\n\n  // Saved contacts. Swap these for the operators you actually use.\n  taxiContact:  { name: 'Niseko Taxi',        phone: 'YOUR_PHONE_NUMBER' },\n  beerContact:  { name: 'Hirafu Bottle Shop', phone: 'YOUR_PHONE_NUMBER' },\n\n  // --- who gets told ----------------------------------------------------------------\n  telegramChatId: 'YOUR_TELEGRAM_CHAT_ID',\n} }}];\n"
+      },
+      "name": "⚙️ CONFIG",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "getAll",
+        "tableId": "japow_trips",
+        "returnAll": true,
+        "filterType": "string",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "locked"
+            }
+          ]
+        }
+      },
+      "name": "Find locked trips",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://aerodatabox.p.rapidapi.com/flights/number/{{ $json.flight_number }}/{{ $json.flight_date }}?withLocation=true",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-rapidapi-host",
+              "value": "aerodatabox.p.rapidapi.com"
+            },
+            {
+              "name": "x-rapidapi-key",
+              "value": "PUT-YOUR-RAPIDAPI-KEY-HERE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "name": "AeroDataBox: flight status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// AeroDataBox \"Flight Status (single day)\" returns an ARRAY of FlightContract.\n// Verified against their OpenAPI spec (host aerodatabox.p.rapidapi.com):\n//   arrival.scheduledTime / revisedTime / predictedTime / runwayTime, plus .status\n// revisedTime is the live one; fall back through predicted -> scheduled.\nconst raw = $input.first().json;\nconst arr = Array.isArray(raw) ? raw : (raw ? [raw] : []);\nif (!arr.length) {\n  return [{ json: { found: false, note: 'no flight returned for that number/date' } }];\n}\nconst f = arr[0];\nconst a = f.arrival || {};\nconst pick = function (t) {\n  if (!t) return null;\n  return t.utc || t.local || null;\n};\nconst iso = pick(a.revisedTime) || pick(a.predictedTime) || pick(a.scheduledTime);\nconst etaMs = iso ? Date.parse(String(iso).replace(' ', 'T')) : NaN;\nconst mins = isNaN(etaMs) ? null : Math.round((etaMs - Date.now()) / 60000);\n\nreturn [{ json: {\n  found: true,\n  flightNumber: f.number || null,\n  status: f.status || null,\n  arrivalAirport: (a.airport || {}).name || null,\n  terminal: a.terminal || null,\n  baggageBelt: a.baggageBelt || null,\n  etaIso: iso,\n  minsToLanding: mins,\n  usedField: pick(a.revisedTime) ? 'revisedTime'\n           : pick(a.predictedTime) ? 'predictedTime' : 'scheduledTime',\n} }];\n"
+      },
+      "name": "Minutes to landing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.minsToLanding }}",
+              "rightValue": 30,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Landing within 30 min?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.bland.ai/v1/calls",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "curl/8.0"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n \"phone_number\": \"{{ $('⚙️ CONFIG').first().json.config.taxiContact.phone }}\",\n \"task\": \"You are Aaron, an Australian snowboarder who has just landed at New Chitose airport in Hokkaido. Wait for the person to greet you first. Only continue if a REAL human answers; if you reach voicemail, hang up immediately and leave no message. Book a transfer from New Chitose airport to a chalet in Hirafu, Niseko, for four people with snowboard bags. Before you end the call, read the pickup time back and confirm it is locked in.\",\n \"voice\": \"nat\",\n \"max_duration\": 5\n}",
+        "options": {}
+      },
+      "name": "Book the transfer (Bland)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "tableId": "japow_trips",
+        "filterType": "string",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "locked"
+            }
+          ]
+        },
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "in_transit"
+            },
+            {
+              "fieldId": "transfer_booked_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        }
+      },
+      "name": "Mark transfer booked",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ '🚕 Transfer booked. Landing in ' + $('Minutes to landing').first().json.minsToLanding + ' min.' }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false
+        }
+      },
+      "name": "Tell the chat: transfer booked",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1740,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "path": "japow-location",
+        "httpMethod": "POST",
+        "options": {}
+      },
+      "name": "Webhook: phone location",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Accepts a location ping from OwnTracks (HTTP mode) OR an iOS Shortcut.\n// OwnTracks posts at minimum: _type:\"location\", lat, lon, tst (epoch seconds), tid.\n// A Shortcut can post {lat, lon} - both shapes are handled.\nconst b = $input.first().json.body || $input.first().json || {};\nconst lat = b.lat != null ? Number(b.lat) : (b.latitude != null ? Number(b.latitude) : null);\nconst lng = b.lon != null ? Number(b.lon) : (b.lng != null ? Number(b.lng)\n          : (b.longitude != null ? Number(b.longitude) : null));\n\nif (lat == null || lng == null || isNaN(lat) || isNaN(lng)) {\n  throw new Error('location ping had no usable lat/lon - got keys: ' + Object.keys(b).join(','));\n}\nreturn [{ json: {\n  lat: lat,\n  lng: lng,\n  source: b._type === 'location' ? 'owntracks' : 'shortcut',\n  tracker: b.tid || null,\n  accuracy_m: b.acc != null ? b.acc : null,\n  fixedAt: b.tst ? new Date(b.tst * 1000).toISOString() : new Date().toISOString(),\n} }];\n"
+      },
+      "name": "Read the location ping",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "getAll",
+        "tableId": "japow_trips",
+        "limit": 1,
+        "filterType": "string",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "in_transit"
+            }
+          ]
+        }
+      },
+      "name": "Find the trip in transit",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        300,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://router.project-osrm.org/route/v1/driving/{{ $('Read the location ping').first().json.lng }},{{ $('Read the location ping').first().json.lat }};{{ $json.chalet_lng }},{{ $json.chalet_lat }}?overview=false",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "name": "OSRM: drive time to chalet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        540,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// OSRM public router: /route/v1/driving/{lng},{lat};{lng},{lat}?overview=false\n// Free and keyless. Swap the base URL for Google Distance Matrix if you want SLAs.\nconst r = $input.first().json;\nconst loc = $('Read the location ping').first().json;\nconst trip = $('Find the trip in transit').first().json;\n\nconst route = (r.routes || [])[0];\nif (!route) {\n  return [{ json: { ok: false, note: 'OSRM returned no route', minsToChalet: null } }];\n}\nconst mins = Math.round(route.duration / 60);\nreturn [{ json: {\n  ok: true,\n  tripId: trip.id,\n  minsToChalet: mins,\n  km: +(route.distance / 1000).toFixed(1),\n  from: { lat: loc.lat, lng: loc.lng },\n  to: { lat: trip.chalet_lat, lng: trip.chalet_lng },\n  beersAlreadyOrdered: !!trip.beers_ordered_at,\n} }];\n"
+      },
+      "name": "Minutes to the chalet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.minsToChalet }}",
+              "rightValue": 10,
+              "operator": {
+                "type": "number",
+                "operation": "lte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Ten minutes out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.bland.ai/v1/calls",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "curl/8.0"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n \"phone_number\": \"{{ $('⚙️ CONFIG').first().json.config.beerContact.phone }}\",\n \"task\": \"You are Aaron, an Australian snowboarder about ten minutes from a chalet in Hirafu, Niseko. Wait for them to greet you first. Only continue with a real human; if voicemail, hang up with no message. Order a slab of cold Sapporo delivered to the chalet, and say you would like it to arrive in about ten minutes. Before ending, read the order and delivery time back and confirm it is locked in.\",\n \"voice\": \"nat\",\n \"max_duration\": 5\n}",
+        "options": {}
+      },
+      "name": "Order the Sapporo (Bland)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1260,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "tableId": "japow_trips",
+        "filterType": "string",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "in_transit"
+            }
+          ]
+        },
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "arrived"
+            },
+            {
+              "fieldId": "beers_ordered_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        }
+      },
+      "name": "Mark beers ordered",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ '🍺 Slab of Sapporo ordered. You are ' + $('Minutes to the chalet').first().json.minsToChalet + ' min out. Timed to land with you.' }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "appendAttribution": false
+        }
+      },
+      "name": "Tell the chat: beers on the way",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1740,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3a. Flight tracking - REAL\n\n**AeroDataBox**, host `aerodatabox.p.rapidapi.com`, `GET /flights/number/{number}/{date}`. Endpoint and field names taken from their published OpenAPI spec, not guessed.\n\n`arrival.revisedTime` is the live ETA; it falls back through `predictedTime` then `scheduledTime`.\n\n➡️ **Put your RapidAPI key in the header on that node.** Flight Status is a paid tier.",
+        "height": 250,
+        "width": 560,
+        "color": 5
+      },
+      "name": "n1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3b. Your live location - REAL\n\nPoint **OwnTracks** (HTTP mode) or an **iOS Shortcut** at the webhook. OwnTracks posts `{_type:'location', lat, lon, tst}`; a Shortcut can post `{lat, lon}`. Both shapes are handled.\n\n**OSRM** then gives real driving minutes from where your phone is to the chalet coordinates saved with the trip. Free, keyless.\n\nSwap in Google Distance Matrix if you want an SLA.",
+        "height": 250,
+        "width": 560,
+        "color": 6
+      },
+      "name": "n2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Why these two are phone calls\n\nNot a cop-out - a limitation of the market:\n\n• **No consumer taxi API** in Japan.\n• **No public consumer Uber Eats ordering API.** Uber's Eats APIs are merchant/POS side only, behind an NDA and partner approval.\n\nSo the system places a **real Bland.ai voice call** to the contact you saved in CONFIG. Voice is the only interface those businesses expose - calling them IS the automation.",
+        "height": 250,
+        "width": 520,
+        "color": 3
+      },
+      "name": "n3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1220,
+        20
+      ]
+    }
+  ],
+  "connections": {
+    "⚙️ CONFIG": {
+      "main": [
+        [
+          {
+            "node": "Find locked trips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find locked trips": {
+      "main": [
+        [
+          {
+            "node": "AeroDataBox: flight status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AeroDataBox: flight status": {
+      "main": [
+        [
+          {
+            "node": "Minutes to landing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Minutes to landing": {
+      "main": [
+        [
+          {
+            "node": "Landing within 30 min?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Landing within 30 min?": {
+      "main": [
+        [
+          {
+            "node": "Book the transfer (Bland)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Book the transfer (Bland)": {
+      "main": [
+        [
+          {
+            "node": "Mark transfer booked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark transfer booked": {
+      "main": [
+        [
+          {
+            "node": "Tell the chat: transfer booked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 15 min": {
+      "main": [
+        [
+          {
+            "node": "⚙️ CONFIG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: phone location": {
+      "main": [
+        [
+          {
+            "node": "Read the location ping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the location ping": {
+      "main": [
+        [
+          {
+            "node": "Find the trip in transit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find the trip in transit": {
+      "main": [
+        [
+          {
+            "node": "OSRM: drive time to chalet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OSRM: drive time to chalet": {
+      "main": [
+        [
+          {
+            "node": "Minutes to the chalet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Minutes to the chalet": {
+      "main": [
+        [
+          {
+            "node": "Ten minutes out?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ten minutes out?": {
+      "main": [
+        [
+          {
+            "node": "Order the Sapporo (Bland)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Order the Sapporo (Bland)": {
+      "main": [
+        [
+          {
+            "node": "Mark beers ordered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark beers ordered": {
+      "main": [
+        [
+          {
+            "node": "Tell the chat: beers on the way",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "activeVersionId": null,
+  "versionCounter": 3,
+  "activeVersion": null
+}
